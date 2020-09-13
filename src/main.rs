@@ -10,8 +10,6 @@ use hardware_query::HardwareSelection;
 use std::{ffi::CString, os::raw::c_char};
 use winit::{event_loop::EventLoop, window::WindowBuilder};
 
-const FRAMES_IN_FLIGHT: usize = 2;
-
 fn main() -> Result<()> {
     // Windowing
     let event_loop = EventLoop::new();
@@ -128,8 +126,8 @@ fn main() -> Result<()> {
     let allocate_info = vk::CommandBufferAllocateInfoBuilder::new()
         .command_pool(command_pool)
         .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(FRAMES_IN_FLIGHT as u32);
-    let command_buffers = unsafe { device.allocate_command_buffers(&allocate_info) }.result()?;
+        .command_buffer_count(1);
+    let command_buffer = unsafe { device.allocate_command_buffers(&allocate_info) }.result()?[0];
 
     // Create allocator
     let mut allocator =
@@ -139,73 +137,36 @@ fn main() -> Result<()> {
         surface_caps.current_extent.width * surface_caps.current_extent.height * 4;
 
     // Create images
-    let mut display_images = Vec::new();
-    let mut display_images_mem = Vec::new();
-    for _ in 0..FRAMES_IN_FLIGHT {
-        let create_info = vk::BufferCreateInfoBuilder::new()
-            .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .size(image_size_bytes as u64);
+    let create_info = vk::BufferCreateInfoBuilder::new()
+        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .size(image_size_bytes as u64);
 
-        let image = unsafe { device.create_buffer(&create_info, None, None) }.result()?;
-        let image_mem = allocator
-            .allocate(&device, image, MemoryTypeFinder::dynamic())
-            .result()?;
-
-        display_images.push(image);
-        display_images_mem.push(image_mem);
-    }
+    let display_image = unsafe { device.create_buffer(&create_info, None, None) }.result()?;
+    let display_image_mem = allocator
+        .allocate(&device, display_image, MemoryTypeFinder::dynamic())
+        .result()?;
 
     // Create synchronization primitives
     let create_info = vk::SemaphoreCreateInfoBuilder::new();
 
     // Whether or not the frame at this index is available (gpu-only)
-    let image_available_semaphores: Vec<_> = (0..FRAMES_IN_FLIGHT)
-        .map(|_| unsafe { device.create_semaphore(&create_info, None, None) }.unwrap())
-        .collect();
+    let image_available = 
+        unsafe { device.create_semaphore(&create_info, None, None) }.result()?;
 
     // Whether or not the frame at this index is finished rendering (gpu-only)
-    let render_finished_semaphores: Vec<_> = (0..FRAMES_IN_FLIGHT)
-        .map(|_| unsafe { device.create_semaphore(&create_info, None, None) }.unwrap())
-        .collect();
-
-    // Whether or not the frame at this index is in flight
-    let create_info = vk::FenceCreateInfoBuilder::new().flags(vk::FenceCreateFlags::SIGNALED);
-    let in_flight_fences: Vec<_> = (0..FRAMES_IN_FLIGHT)
-        .map(|_| unsafe { device.create_fence(&create_info, None, None) }.unwrap())
-        .collect();
-
-    // Whether or not the swapchain image that corresponds to this index is in flight or not
-    let mut images_in_flight: Vec<_> = swapchain_images.iter().map(|_| vk::Fence::null()).collect();
+    let render_finished =
+        unsafe { device.create_semaphore(&create_info, None, None) }.result()?;
 
     // Main loop
-    let mut frame_idx = 0;
     let mut time = 0;
     loop {
-        // Make sure the frame at this index has completed rendering and is no longer in use
-        let in_flight_fence = in_flight_fences[frame_idx];
-        let image_available = image_available_semaphores[frame_idx];
-        let render_finished = render_finished_semaphores[frame_idx];
-        unsafe {
-            device
-                .wait_for_fences(&[in_flight_fence], true, u64::MAX)
-                .unwrap();
-        }
-
         // Get the index of the next swapchain image,
         // and set up a semaphore to be notified when it is ready.
         let image_index = unsafe {
             device.acquire_next_image_khr(swapchain, u64::MAX, Some(image_available), None, None)
         }
         .result()?;
-        dbg!(frame_idx, image_index);
-
-        // Make sure the swapchain image last associated with this frame is finished being used.
-        let image_in_flight = images_in_flight[image_index as usize];
-        if !image_in_flight.is_null() {
-            unsafe { device.wait_for_fences(&[image_in_flight], true, u64::MAX) }.unwrap();
-        }
-        images_in_flight[image_index as usize] = in_flight_fence;
 
         // Create image data
         let the_image = (0..image_size_bytes)
@@ -216,18 +177,17 @@ fn main() -> Result<()> {
                     0
                 }
             })
-            .collect::<Vec<_>>();
+        .collect::<Vec<_>>();
 
         // Map image data
-        let mut map = display_images_mem[frame_idx].map(&device, ..).result()?;
+        let mut map = display_image_mem.map(&device, ..).result()?;
         map.import(&the_image);
         map.unmap(&device).result()?;
 
-        let display_image = display_images[frame_idx];
         let swapchain_image = swapchain_images[image_index as usize];
 
         // Build command buffer
-        let command_buffer = command_buffers[frame_idx as usize];
+        let command_buffer = command_buffer;
         unsafe {
             let begin_info = vk::CommandBufferBeginInfoBuilder::new();
             device.reset_command_buffer(command_buffer, None).result()?;
@@ -337,9 +297,8 @@ fn main() -> Result<()> {
             .command_buffers(&command_buffers)
             .signal_semaphores(&signal_semaphores);
         unsafe {
-            device.reset_fences(&[in_flight_fence]).unwrap();
             device
-                .queue_submit(queue, &[submit_info], Some(in_flight_fence))
+                .queue_submit(queue, &[submit_info], None)
                 .unwrap()
         }
 
@@ -352,7 +311,10 @@ fn main() -> Result<()> {
 
         unsafe { device.queue_present_khr(queue, &present_info) }.unwrap();
 
-        frame_idx = (frame_idx + 1) % FRAMES_IN_FLIGHT;
+        unsafe {
+            device.queue_wait_idle(queue).result()?;
+        }
+
         time += 1;
     }
 }
