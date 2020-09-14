@@ -10,7 +10,8 @@ use hardware_query::HardwareSelection;
 use std::{ffi::CString, os::raw::c_char};
 use winit::{event_loop::EventLoop, window::WindowBuilder};
 
-const COLOR_FORMAT: vk::Format = vk::Format::B8G8R8A8_SRGB;
+const COLOR_FORMAT_SWAP: vk::Format = vk::Format::B8G8R8A8_SRGB;
+const COLOR_FORMAT_INTERMEDIATE: vk::Format = vk::Format::R8G8B8A8_UINT;
 const DATA_FORMAT: vk::Format = vk::Format::R8_UINT;
 
 fn main() -> Result<()> {
@@ -97,7 +98,6 @@ fn main() -> Result<()> {
     }
     .result()?;
     let mut image_count = surface_caps.min_image_count + 1;
-    dbg!(surface_caps.supported_usage_flags);
     if surface_caps.max_image_count > 0 && image_count > surface_caps.max_image_count {
         image_count = surface_caps.max_image_count;
     }
@@ -105,11 +105,11 @@ fn main() -> Result<()> {
     let create_info = khr_swapchain::SwapchainCreateInfoKHRBuilder::new()
         .surface(surface)
         .min_image_count(image_count)
-        .image_format(COLOR_FORMAT)
+        .image_format(COLOR_FORMAT_SWAP)
         .image_color_space(format.color_space)
         .image_extent(surface_caps.current_extent)
         .image_array_layers(1)
-        .image_usage(vk::ImageUsageFlags::STORAGE)
+        .image_usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::COLOR_ATTACHMENT)
         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
         .pre_transform(surface_caps.current_transform)
         .composite_alpha(khr_surface::CompositeAlphaFlagBitsKHR::OPAQUE_KHR)
@@ -119,6 +119,7 @@ fn main() -> Result<()> {
 
     let swapchain = unsafe { device.create_swapchain_khr(&create_info, None, None) }.result()?;
     let swapchain_images = unsafe { device.get_swapchain_images_khr(swapchain, None) }.result()?;
+    dbg!(&swapchain_images);
 
     // Create command pool
     let create_info = vk::CommandPoolCreateInfoBuilder::new()
@@ -205,7 +206,7 @@ fn main() -> Result<()> {
     let pipeline =
         unsafe { device.create_compute_pipelines(None, &[create_info], None) }.result()?[0];
 
-    // Create images
+    // Create GOL images
     let extent_3d = vk::Extent3DBuilder::new()
         .width(surface_caps.current_extent.width)
         .height(surface_caps.current_extent.height)
@@ -226,6 +227,30 @@ fn main() -> Result<()> {
     let gol_image_mem = allocator
         .allocate(&device, gol_image, MemoryTypeFinder::dynamic())
         .result()?;
+    dbg!(gol_image);
+
+    // Create intermediate image
+    let extent_3d = vk::Extent3DBuilder::new()
+        .width(surface_caps.current_extent.width)
+        .height(surface_caps.current_extent.height)
+        .depth(1)
+        .build();
+    let create_info = vk::ImageCreateInfoBuilder::new()
+        .image_type(vk::ImageType::_2D)
+        .extent(extent_3d)
+        .mip_levels(1)
+        .array_layers(1)
+        .format(COLOR_FORMAT_INTERMEDIATE)
+        .tiling(vk::ImageTiling::LINEAR)
+        .initial_layout(vk::ImageLayout::UNDEFINED)
+        .usage(vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .samples(vk::SampleCountFlagBits::_1);
+    let intermediate_image = unsafe { device.create_image(&create_info, None, None) }.result()?;
+    let intermediate_image_mem = allocator
+        .allocate(&device, intermediate_image, MemoryTypeFinder::dynamic())
+        .result()?;
+    dbg!(intermediate_image);
 
     // Create image views
     // One for each layer of the GOL image, and one for each swapchain image
@@ -250,13 +275,24 @@ fn main() -> Result<()> {
             let create_info = vk::ImageViewCreateInfoBuilder::new()
                 .image(image)
                 .view_type(vk::ImageViewType::_2D)
-                .format(COLOR_FORMAT)
+                .format(COLOR_FORMAT_SWAP)
                 .components(rgba_cm)
                 .subresource_range(sub);
             unsafe { device.create_image_view(&create_info, None, None) }.result()
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    // Create intermediate image view
+    let create_info = vk::ImageViewCreateInfoBuilder::new()
+        .image(intermediate_image)
+        .view_type(vk::ImageViewType::_2D)
+        .format(COLOR_FORMAT_INTERMEDIATE)
+        .components(rgba_cm)
+        .subresource_range(sub);
+    let intermediate_image_view =
+        unsafe { device.create_image_view(&create_info, None, None) }.result()?;
+
+    // Create game of life image views
     let data_cm = vk::ComponentMapping {
         r: vk::ComponentSwizzle::IDENTITY,
         g: vk::ComponentSwizzle::IDENTITY,
@@ -327,14 +363,14 @@ fn main() -> Result<()> {
 
         // Update descriptor set to include the buffer
         unsafe {
-            let swapchain_diib = [vk::DescriptorImageInfoBuilder::new()
+            let intermediate_diib = [vk::DescriptorImageInfoBuilder::new()
                 .image_layout(vk::ImageLayout::GENERAL)
-                .image_view(swapchain_image_view)];
-            let swapchain_desc = vk::WriteDescriptorSetBuilder::new()
+                .image_view(intermediate_image_view)];
+            let intermediate_desc = vk::WriteDescriptorSetBuilder::new()
                 .dst_set(descriptor_set)
                 .dst_binding(0)
                 .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                .image_info(&swapchain_diib);
+                .image_info(&intermediate_diib);
 
             let read_diib = [vk::DescriptorImageInfoBuilder::new()
                 .image_view(if read_a {
@@ -362,7 +398,7 @@ fn main() -> Result<()> {
                 .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
                 .image_info(&write_diib);
 
-            device.update_descriptor_sets(&[swapchain_desc, read_desc, write_desc], &[])
+            device.update_descriptor_sets(&[intermediate_desc, read_desc, write_desc], &[])
         };
 
         // Build command buffer
@@ -375,7 +411,7 @@ fn main() -> Result<()> {
                 .begin_command_buffer(command_buffer, &begin_info)
                 .result()?;
 
-            // Transition swapchain image from (undefined) to GENERAL
+            // Barrier (intermediate `UNDEFINED` -> `GENERAL`)
             let sub = vk::ImageSubresourceRangeBuilder::new()
                 .aspect_mask(vk::ImageAspectFlags::COLOR)
                 .base_mip_level(0)
@@ -384,8 +420,8 @@ fn main() -> Result<()> {
                 .layer_count(1)
                 .build();
 
-            let swapchain_image_barrier = vk::ImageMemoryBarrierBuilder::new()
-                .image(swapchain_image)
+            let intermediate_image_barrier = vk::ImageMemoryBarrierBuilder::new()
+                .image(intermediate_image)
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::GENERAL)
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -401,7 +437,7 @@ fn main() -> Result<()> {
                 None,
                 &[],
                 &[],
-                &[swapchain_image_barrier],
+                &[intermediate_image_barrier],
             );
 
             // Bind pipeline
@@ -428,19 +464,21 @@ fn main() -> Result<()> {
                 1,
             );
 
-            // Transition swapchain image from GENERAL to PRESENT_SRC_KHR
-            let sub = vk::ImageSubresourceRangeBuilder::new()
-                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                .base_mip_level(0)
-                .level_count(1)
-                .base_array_layer(0)
-                .layer_count(1)
-                .build();
+            // Barrier (intermediate `GENERAL` -> `TRANSFER_SRC`), (swapchain `UNDEFINED` -> `TRANSFER_DST`)
+            let intermediate_image_barrier = vk::ImageMemoryBarrierBuilder::new()
+                .image(intermediate_image)
+                .old_layout(vk::ImageLayout::GENERAL)
+                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::empty())
+                .subresource_range(sub);
 
             let swapchain_image_barrier = vk::ImageMemoryBarrierBuilder::new()
-                .image(swapchain_image)
-                .old_layout(vk::ImageLayout::GENERAL)
-                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .image(intermediate_image)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .src_access_mask(vk::AccessFlags::SHADER_WRITE)
@@ -454,9 +492,56 @@ fn main() -> Result<()> {
                 None,
                 &[],
                 &[],
+                &[intermediate_image_barrier, swapchain_image_barrier],
+            );
+
+            // Copy intermediate image to swapchain image
+            let off = vk::Offset3DBuilder::new().x(0).y(0).z(0).build();
+            let sub_layers = vk::ImageSubresourceLayersBuilder::new()
+                        .layer_count(1)
+                        .base_array_layer(0)
+                        .mip_level(1)
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .build();
+            let copy_info = [
+                vk::ImageCopyBuilder::new()
+                    .src_subresource(sub_layers)
+                    .src_offset(off)
+                    .dst_subresource(sub_layers)
+                    .dst_offset(off)
+                    .extent(extent_3d)
+            ];
+            device.cmd_copy_image(
+                command_buffer,
+                intermediate_image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                swapchain_image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &copy_info
+            );
+
+            // Barrier (swapchain `TRANSFER_DST` -> `PRESENT_SRC`)
+            let swapchain_image_barrier = vk::ImageMemoryBarrierBuilder::new()
+                .image(swapchain_image)
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::empty())
+                .subresource_range(sub);
+
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                None,
+                &[],
+                &[],
                 &[swapchain_image_barrier],
             );
 
+            // End command buffer
             device.end_command_buffer(command_buffer).result()?;
         }
 
@@ -485,5 +570,6 @@ fn main() -> Result<()> {
             device.queue_wait_idle(queue).result()?;
         }
         read_a = !read_a;
+        break Ok(());
     }
 }

@@ -10,3 +10,5 @@ Dispatch ( -> intermediate)
 Barrier (intermediate `GENERAL` -> `TRANSFER_SRC`), (swapchain `UNDEFINED` -> `TRANSFER_DST`)
 CopyImage (intermediate -> swapchain)
 Barrier (swapchain `TRANSFER_DST` -> `PRESENT_SRC`)
+
+Create image view for intermediate
