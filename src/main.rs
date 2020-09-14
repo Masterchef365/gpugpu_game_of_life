@@ -476,7 +476,7 @@ fn main() -> Result<()> {
                 .subresource_range(sub);
 
             let swapchain_image_barrier = vk::ImageMemoryBarrierBuilder::new()
-                .image(intermediate_image)
+                .image(swapchain_image)
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -500,7 +500,7 @@ fn main() -> Result<()> {
             let sub_layers = vk::ImageSubresourceLayersBuilder::new()
                         .layer_count(1)
                         .base_array_layer(0)
-                        .mip_level(1)
+                        .mip_level(0)
                         .aspect_mask(vk::ImageAspectFlags::COLOR)
                         .build();
             let copy_info = [
