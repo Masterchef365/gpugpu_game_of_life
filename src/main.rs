@@ -119,7 +119,6 @@ fn main() -> Result<()> {
 
     let swapchain = unsafe { device.create_swapchain_khr(&create_info, None, None) }.result()?;
     let swapchain_images = unsafe { device.get_swapchain_images_khr(swapchain, None) }.result()?;
-    dbg!(&swapchain_images);
 
     // Create command pool
     let create_info = vk::CommandPoolCreateInfoBuilder::new()
@@ -224,10 +223,9 @@ fn main() -> Result<()> {
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
         .samples(vk::SampleCountFlagBits::_1);
     let gol_image = unsafe { device.create_image(&create_info, None, None) }.result()?;
-    let gol_image_mem = allocator
+    let _gol_image_mem = allocator
         .allocate(&device, gol_image, MemoryTypeFinder::dynamic())
         .result()?;
-    dbg!(gol_image);
 
     // Create intermediate image
     let extent_3d = vk::Extent3DBuilder::new()
@@ -247,10 +245,9 @@ fn main() -> Result<()> {
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
         .samples(vk::SampleCountFlagBits::_1);
     let intermediate_image = unsafe { device.create_image(&create_info, None, None) }.result()?;
-    let intermediate_image_mem = allocator
+    let _intermediate_image_mem = allocator
         .allocate(&device, intermediate_image, MemoryTypeFinder::dynamic())
         .result()?;
-    dbg!(intermediate_image);
 
     // Create image views
     // One for each layer of the GOL image, and one for each swapchain image
@@ -269,19 +266,6 @@ fn main() -> Result<()> {
         a: vk::ComponentSwizzle::IDENTITY,
     };
 
-    let swapchain_image_views = swapchain_images
-        .iter()
-        .map(|&image| {
-            let create_info = vk::ImageViewCreateInfoBuilder::new()
-                .image(image)
-                .view_type(vk::ImageViewType::_2D)
-                .format(COLOR_FORMAT_SWAP)
-                .components(rgba_cm)
-                .subresource_range(sub);
-            unsafe { device.create_image_view(&create_info, None, None) }.result()
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
     // Create intermediate image view
     let create_info = vk::ImageViewCreateInfoBuilder::new()
         .image(intermediate_image)
@@ -295,9 +279,9 @@ fn main() -> Result<()> {
     // Create game of life image views
     let data_cm = vk::ComponentMapping {
         r: vk::ComponentSwizzle::IDENTITY,
-        g: vk::ComponentSwizzle::IDENTITY,
-        b: vk::ComponentSwizzle::IDENTITY,
-        a: vk::ComponentSwizzle::IDENTITY,
+        g: vk::ComponentSwizzle::ZERO,
+        b: vk::ComponentSwizzle::ZERO,
+        a: vk::ComponentSwizzle::ZERO,
     };
 
     // Create view A:
@@ -359,7 +343,6 @@ fn main() -> Result<()> {
         .result()?;
 
         let swapchain_image = swapchain_images[image_index as usize];
-        let swapchain_image_view = swapchain_image_views[image_index as usize];
 
         // Update descriptor set to include the buffer
         unsafe {
@@ -440,10 +423,8 @@ fn main() -> Result<()> {
                 &[intermediate_image_barrier],
             );
 
-            // Bind pipeline
+            // Dispatch
             device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::COMPUTE, pipeline);
-
-            // Bind descriptors
             device.cmd_bind_descriptor_sets(
                 command_buffer,
                 vk::PipelineBindPoint::COMPUTE,
@@ -453,10 +434,9 @@ fn main() -> Result<()> {
                 &[],
             );
 
-            // Dispatch
-            const LOCAL_SIZE_X: u32 = 16;
+            const LOCAL_SIZE_X: u32 = 16; // TODO: Better handling of sizes
             const LOCAL_SIZE_Y: u32 = 16;
-            // TODO: Better handling of sizes
+
             device.cmd_dispatch(
                 command_buffer,
                 surface_caps.current_extent.width / LOCAL_SIZE_X,
@@ -498,26 +478,24 @@ fn main() -> Result<()> {
             // Copy intermediate image to swapchain image
             let off = vk::Offset3DBuilder::new().x(0).y(0).z(0).build();
             let sub_layers = vk::ImageSubresourceLayersBuilder::new()
-                        .layer_count(1)
-                        .base_array_layer(0)
-                        .mip_level(0)
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .build();
-            let copy_info = [
-                vk::ImageCopyBuilder::new()
-                    .src_subresource(sub_layers)
-                    .src_offset(off)
-                    .dst_subresource(sub_layers)
-                    .dst_offset(off)
-                    .extent(extent_3d)
-            ];
+                .layer_count(1)
+                .base_array_layer(0)
+                .mip_level(0)
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .build();
+            let copy_info = [vk::ImageCopyBuilder::new()
+                .src_subresource(sub_layers)
+                .src_offset(off)
+                .dst_subresource(sub_layers)
+                .dst_offset(off)
+                .extent(extent_3d)];
             device.cmd_copy_image(
                 command_buffer,
                 intermediate_image,
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                 swapchain_image,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &copy_info
+                &copy_info,
             );
 
             // Barrier (swapchain `TRANSFER_DST` -> `PRESENT_SRC`)
@@ -555,7 +533,7 @@ fn main() -> Result<()> {
             .wait_dst_stage_mask(&[vk::PipelineStageFlags::COMPUTE_SHADER])
             .command_buffers(&command_buffers)
             .signal_semaphores(&signal_semaphores);
-        unsafe { device.queue_submit(queue, &[submit_info], None).unwrap() }
+        unsafe { device.queue_submit(queue, &[submit_info], None) }.result()?;
 
         let swapchains = [swapchain];
         let image_indices = [image_index];
@@ -564,11 +542,12 @@ fn main() -> Result<()> {
             .swapchains(&swapchains)
             .image_indices(&image_indices);
 
-        unsafe { device.queue_present_khr(queue, &present_info) }.unwrap();
+        unsafe { device.queue_present_khr(queue, &present_info) }.result()?;
 
         unsafe {
             device.queue_wait_idle(queue).result()?;
         }
         read_a = !read_a;
     }
+    // TODO: Dealloc all, use winit eventloop
 }

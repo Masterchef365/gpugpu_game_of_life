@@ -1,11 +1,17 @@
 #version 450
 layout (local_size_x = 16, local_size_y = 16) in;
 
-layout (binding=0, rgba8ui) uniform writeonly uimage2D display;
-layout (binding=1, r8ui) uniform readonly uimage2D read;
-layout (binding=2, r8ui) uniform writeonly uimage2D write;
+layout (binding=0, rgba8ui) uniform writeonly uimage2D displayImg;
+layout (binding=1, r8ui) uniform readonly uimage2D readImg;
+layout (binding=2, r8ui) uniform writeonly uimage2D writeImg;
 
 void main() {
     ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
-    imageStore(display, gid, uvec4(255, 0, 0, 255));
+    uvec3 color = uvec3(
+        (255 * gl_LocalInvocationID.x) / 16,
+        0,
+        0
+    );
+    imageStore(displayImg, gid, uvec4(color, 255));
+    //imageStore(writeImg, gid, uvec4(255));
 }
