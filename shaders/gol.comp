@@ -7,10 +7,18 @@ layout (binding=2, r8ui) uniform writeonly uimage2D writeImg;
 
 void main() {
     ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
-    uvec3 color = uvec3(
-        (255 * gl_LocalInvocationID.x) / 16,
-        0,
-        0
-    );
+    uvec4 inp = imageLoad(readImg, gid);
+
+    uvec3 color;
+    uvec4 outp;
+    if (inp.x == 0) {
+        color = uvec3(255, 0, 0);
+        outp = uvec4(1, 0, 0, 0);
+    } else {
+        color = uvec3(0, 255, 0);
+        outp = uvec4(0, 0, 0, 0);
+    }
+
+    imageStore(writeImg, gid, outp);
     imageStore(displayImg, gid, uvec4(color, 255));
 }
