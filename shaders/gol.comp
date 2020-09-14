@@ -13,5 +13,4 @@ void main() {
         0
     );
     imageStore(displayImg, gid, uvec4(color, 255));
-    //imageStore(writeImg, gid, uvec4(255));
 }

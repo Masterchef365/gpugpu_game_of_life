@@ -260,9 +260,9 @@ fn main() -> Result<()> {
         .build();
 
     let rgba_cm = vk::ComponentMapping {
-        r: vk::ComponentSwizzle::IDENTITY,
-        g: vk::ComponentSwizzle::IDENTITY,
-        b: vk::ComponentSwizzle::IDENTITY,
+        r: vk::ComponentSwizzle::B,
+        g: vk::ComponentSwizzle::G,
+        b: vk::ComponentSwizzle::R,
         a: vk::ComponentSwizzle::IDENTITY,
     };
 
