@@ -293,9 +293,9 @@ fn main() -> Result<()> {
     // Create game of life image views
     let data_cm = vk::ComponentMapping {
         r: vk::ComponentSwizzle::IDENTITY,
-        g: vk::ComponentSwizzle::ZERO,
-        b: vk::ComponentSwizzle::ZERO,
-        a: vk::ComponentSwizzle::ZERO,
+        g: vk::ComponentSwizzle::IDENTITY,
+        b: vk::ComponentSwizzle::IDENTITY,
+        a: vk::ComponentSwizzle::IDENTITY,
     };
 
     // Create view A:
