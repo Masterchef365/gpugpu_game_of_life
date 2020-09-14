@@ -97,6 +97,7 @@ fn main() -> Result<()> {
     }
     .result()?;
     let mut image_count = surface_caps.min_image_count + 1;
+    dbg!(surface_caps.supported_usage_flags);
     if surface_caps.max_image_count > 0 && image_count > surface_caps.max_image_count {
         image_count = surface_caps.max_image_count;
     }
@@ -104,7 +105,6 @@ fn main() -> Result<()> {
     let create_info = khr_swapchain::SwapchainCreateInfoKHRBuilder::new()
         .surface(surface)
         .min_image_count(image_count)
-        //.image_format(format.format)
         .image_format(COLOR_FORMAT)
         .image_color_space(format.color_space)
         .image_extent(surface_caps.current_extent)
@@ -217,7 +217,7 @@ fn main() -> Result<()> {
         .mip_levels(1)
         .array_layers(2)
         .format(DATA_FORMAT)
-        .tiling(vk::ImageTiling::OPTIMAL)
+        .tiling(vk::ImageTiling::LINEAR)
         .initial_layout(vk::ImageLayout::UNDEFINED)
         .usage(vk::ImageUsageFlags::STORAGE)
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
@@ -244,13 +244,6 @@ fn main() -> Result<()> {
         a: vk::ComponentSwizzle::IDENTITY,
     };
 
-    let data_cm = vk::ComponentMapping {
-        r: vk::ComponentSwizzle::IDENTITY,
-        g: vk::ComponentSwizzle::IDENTITY,
-        b: vk::ComponentSwizzle::IDENTITY,
-        a: vk::ComponentSwizzle::IDENTITY,
-    };
-
     let swapchain_image_views = swapchain_images
         .iter()
         .map(|&image| {
@@ -264,6 +257,14 @@ fn main() -> Result<()> {
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let data_cm = vk::ComponentMapping {
+        r: vk::ComponentSwizzle::IDENTITY,
+        g: vk::ComponentSwizzle::IDENTITY,
+        b: vk::ComponentSwizzle::IDENTITY,
+        a: vk::ComponentSwizzle::IDENTITY,
+    };
+
+    // Create view A:
     let data_sub = vk::ImageSubresourceRangeBuilder::new()
         .aspect_mask(vk::ImageAspectFlags::COLOR)
         .base_mip_level(0)
@@ -278,8 +279,26 @@ fn main() -> Result<()> {
         .format(DATA_FORMAT)
         .components(data_cm)
         .subresource_range(data_sub);
+
     let gol_image_view_a =
         unsafe { device.create_image_view(&create_info, None, None) }.result()?;
+
+    // Create view B:
+    let data_sub = vk::ImageSubresourceRangeBuilder::new()
+        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .base_mip_level(0)
+        .level_count(1)
+        .base_array_layer(1) // Select layer B
+        .layer_count(1)
+        .build();
+
+    let create_info = vk::ImageViewCreateInfoBuilder::new()
+        .image(gol_image)
+        .view_type(vk::ImageViewType::_2D)
+        .format(DATA_FORMAT)
+        .components(data_cm)
+        .subresource_range(data_sub);
+
     let gol_image_view_b =
         unsafe { device.create_image_view(&create_info, None, None) }.result()?;
 
@@ -308,30 +327,35 @@ fn main() -> Result<()> {
 
         // Update descriptor set to include the buffer
         unsafe {
-            let swapchain_diib =
-                [vk::DescriptorImageInfoBuilder::new().image_view(swapchain_image_view)];
+            let swapchain_diib = [vk::DescriptorImageInfoBuilder::new()
+                .image_layout(vk::ImageLayout::GENERAL)
+                .image_view(swapchain_image_view)];
             let swapchain_desc = vk::WriteDescriptorSetBuilder::new()
                 .dst_set(descriptor_set)
                 .dst_binding(0)
                 .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
                 .image_info(&swapchain_diib);
 
-            let read_diib = [vk::DescriptorImageInfoBuilder::new().image_view(if read_a {
-                gol_image_view_a
-            } else {
-                gol_image_view_b
-            })];
+            let read_diib = [vk::DescriptorImageInfoBuilder::new()
+                .image_view(if read_a {
+                    gol_image_view_a
+                } else {
+                    gol_image_view_b
+                })
+                .image_layout(vk::ImageLayout::GENERAL)];
             let read_desc = vk::WriteDescriptorSetBuilder::new()
                 .dst_set(descriptor_set)
                 .dst_binding(1)
                 .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
                 .image_info(&read_diib);
 
-            let write_diib = [vk::DescriptorImageInfoBuilder::new().image_view(if read_a {
-                gol_image_view_b
-            } else {
-                gol_image_view_a
-            })];
+            let write_diib = [vk::DescriptorImageInfoBuilder::new()
+                .image_view(if read_a {
+                    gol_image_view_b
+                } else {
+                    gol_image_view_a
+                })
+                .image_layout(vk::ImageLayout::GENERAL)];
             let write_desc = vk::WriteDescriptorSetBuilder::new()
                 .dst_set(descriptor_set)
                 .dst_binding(2)
@@ -344,14 +368,14 @@ fn main() -> Result<()> {
         // Build command buffer
         let command_buffer = command_buffer;
         unsafe {
-            let begin_info = vk::CommandBufferBeginInfoBuilder::new();
             device.reset_command_buffer(command_buffer, None).result()?;
+
+            let begin_info = vk::CommandBufferBeginInfoBuilder::new();
             device
                 .begin_command_buffer(command_buffer, &begin_info)
                 .result()?;
 
-            // Transition display image from GENERAL to SRC_OPTIMAL, preserving contents
-            // Transition swapchain image from SRC_KHR to DST_OPTIMAL
+            // Transition swapchain image from (undefined) to GENERAL
             let sub = vk::ImageSubresourceRangeBuilder::new()
                 .aspect_mask(vk::ImageAspectFlags::COLOR)
                 .base_mip_level(0)
@@ -380,10 +404,31 @@ fn main() -> Result<()> {
                 &[swapchain_image_barrier],
             );
 
-            // TODO: Invoke shader here!
+            // Bind pipeline
+            device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::COMPUTE, pipeline);
 
-            // Transition display image from SRC_OPTIMAL to GENERAL, preserving contents
-            // Transition swapchain image from DST_OPTIMAL to SRC_KHR
+            // Bind descriptors
+            device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                pipeline_layout,
+                0,
+                &[descriptor_set],
+                &[],
+            );
+
+            // Dispatch
+            const LOCAL_SIZE_X: u32 = 16;
+            const LOCAL_SIZE_Y: u32 = 16;
+            // TODO: Better handling of sizes
+            device.cmd_dispatch(
+                command_buffer,
+                surface_caps.current_extent.width / LOCAL_SIZE_X,
+                surface_caps.current_extent.height / LOCAL_SIZE_Y,
+                1,
+            );
+
+            // Transition swapchain image from GENERAL to PRESENT_SRC_KHR
             let sub = vk::ImageSubresourceRangeBuilder::new()
                 .aspect_mask(vk::ImageAspectFlags::COLOR)
                 .base_mip_level(0)
