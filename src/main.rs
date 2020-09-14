@@ -527,7 +527,7 @@ fn main() -> Result<()> {
                 .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .src_access_mask(vk::AccessFlags::empty())
                 .dst_access_mask(vk::AccessFlags::empty())
                 .subresource_range(sub);
 
@@ -570,6 +570,5 @@ fn main() -> Result<()> {
             device.queue_wait_idle(queue).result()?;
         }
         read_a = !read_a;
-        break Ok(());
     }
 }
