@@ -12,7 +12,7 @@ use winit::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
-    dpi::PhysicalPosition,
+    dpi::{PhysicalPosition, PhysicalSize, Size},
 };
 
 const COLOR_FORMAT_SWAP: vk::Format = vk::Format::B8G8R8A8_SRGB;
@@ -22,7 +22,10 @@ const DATA_FORMAT: vk::Format = vk::Format::R8_UINT;
 fn main() -> Result<()> {
     // Windowing
     let event_loop = EventLoop::new();
-    let window = WindowBuilder::new().build(&event_loop)?;
+    let window = WindowBuilder::new()
+        .with_inner_size(Size::Physical(PhysicalSize::new(1000, 1000)))
+        .with_resizable(false)
+        .build(&event_loop)?;
 
     // App info
     let entry = EntryLoader::new()?;
