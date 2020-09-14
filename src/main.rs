@@ -1,14 +1,17 @@
 mod hardware_query;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use erupt::{
     cstr,
     extensions::{ext_debug_utils, khr_surface, khr_swapchain},
-    utils::{allocator::*, surface},
+    utils::{allocator::*, decode_spv, surface},
     vk1_0 as vk, DeviceLoader, EntryLoader, InstanceLoader,
 };
 use hardware_query::HardwareSelection;
 use std::{ffi::CString, os::raw::c_char};
 use winit::{event_loop::EventLoop, window::WindowBuilder};
+
+const COLOR_FORMAT: vk::Format = vk::Format::B8G8R8A8_SRGB;
+const DATA_FORMAT: vk::Format = vk::Format::R8_UINT;
 
 fn main() -> Result<()> {
     // Windowing
@@ -101,11 +104,12 @@ fn main() -> Result<()> {
     let create_info = khr_swapchain::SwapchainCreateInfoKHRBuilder::new()
         .surface(surface)
         .min_image_count(image_count)
-        .image_format(format.format)
+        //.image_format(format.format)
+        .image_format(COLOR_FORMAT)
         .image_color_space(format.color_space)
         .image_extent(surface_caps.current_extent)
         .image_array_layers(1)
-        .image_usage(vk::ImageUsageFlags::TRANSFER_DST)
+        .image_usage(vk::ImageUsageFlags::STORAGE)
         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
         .pre_transform(surface_caps.current_transform)
         .composite_alpha(khr_surface::CompositeAlphaFlagBitsKHR::OPAQUE_KHR)
@@ -133,33 +137,164 @@ fn main() -> Result<()> {
     let mut allocator =
         Allocator::new(&instance, physical_device, AllocatorCreateInfo::default()).result()?;
 
-    let image_size_bytes =
-        surface_caps.current_extent.width * surface_caps.current_extent.height * 4;
+    // Descriptors
+    // Pool:
+    let pool_sizes = [vk::DescriptorPoolSizeBuilder::new()
+        ._type(vk::DescriptorType::STORAGE_IMAGE)
+        .descriptor_count(3)];
+    let create_info = vk::DescriptorPoolCreateInfoBuilder::new()
+        .pool_sizes(&pool_sizes)
+        .max_sets(2);
+    let descriptor_pool =
+        unsafe { device.create_descriptor_pool(&create_info, None, None) }.result()?;
+
+    // Layout:
+    let bindings = [
+        vk::DescriptorSetLayoutBindingBuilder::new() // Swapchain image
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        vk::DescriptorSetLayoutBindingBuilder::new() // Read image
+            .binding(1)
+            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        vk::DescriptorSetLayoutBindingBuilder::new() // Write image
+            .binding(2)
+            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE),
+    ];
+
+    let create_info = vk::DescriptorSetLayoutCreateInfoBuilder::new().bindings(&bindings);
+
+    let descriptor_set_layout =
+        unsafe { device.create_descriptor_set_layout(&create_info, None, None) }.result()?;
+
+    // Set:
+    let descriptor_set_layouts = [descriptor_set_layout];
+    let create_info = vk::DescriptorSetAllocateInfoBuilder::new()
+        .descriptor_pool(descriptor_pool)
+        .set_layouts(&descriptor_set_layouts);
+
+    let descriptor_set = unsafe { device.allocate_descriptor_sets(&create_info) }.result()?[0];
+
+    // Load shader
+    let shader_spirv = std::fs::read("shaders/gol.comp.spv").context("Shader failed to load")?;
+    let shader_decoded = decode_spv(&shader_spirv).context("Shader decode failed")?;
+    let create_info = vk::ShaderModuleCreateInfoBuilder::new().code(&shader_decoded);
+    let shader_module =
+        unsafe { device.create_shader_module(&create_info, None, None) }.result()?;
+
+    // Pipeline
+    let create_info =
+        vk::PipelineLayoutCreateInfoBuilder::new().set_layouts(&descriptor_set_layouts);
+    let pipeline_layout =
+        unsafe { device.create_pipeline_layout(&create_info, None, None) }.result()?;
+
+    let entry_point = CString::new("main")?;
+    let stage = vk::PipelineShaderStageCreateInfoBuilder::new()
+        .stage(vk::ShaderStageFlagBits::COMPUTE)
+        .module(shader_module)
+        .name(&entry_point)
+        .build();
+    let create_info = vk::ComputePipelineCreateInfoBuilder::new()
+        .stage(stage)
+        .layout(pipeline_layout);
+    let pipeline =
+        unsafe { device.create_compute_pipelines(None, &[create_info], None) }.result()?[0];
 
     // Create images
-    let create_info = vk::BufferCreateInfoBuilder::new()
-        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+    let extent_3d = vk::Extent3DBuilder::new()
+        .width(surface_caps.current_extent.width)
+        .height(surface_caps.current_extent.height)
+        .depth(1)
+        .build();
+    let create_info = vk::ImageCreateInfoBuilder::new()
+        .image_type(vk::ImageType::_2D)
+        .extent(extent_3d)
+        .mip_levels(1)
+        .array_layers(2)
+        .format(DATA_FORMAT)
+        .tiling(vk::ImageTiling::OPTIMAL)
+        .initial_layout(vk::ImageLayout::UNDEFINED)
+        .usage(vk::ImageUsageFlags::STORAGE)
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
-        .size(image_size_bytes as u64);
-
-    let display_image = unsafe { device.create_buffer(&create_info, None, None) }.result()?;
-    let display_image_mem = allocator
-        .allocate(&device, display_image, MemoryTypeFinder::dynamic())
+        .samples(vk::SampleCountFlagBits::_1);
+    let gol_image = unsafe { device.create_image(&create_info, None, None) }.result()?;
+    let gol_image_mem = allocator
+        .allocate(&device, gol_image, MemoryTypeFinder::dynamic())
         .result()?;
+
+    // Create image views
+    // One for each layer of the GOL image, and one for each swapchain image
+    let sub = vk::ImageSubresourceRangeBuilder::new()
+        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .base_mip_level(0)
+        .level_count(1)
+        .base_array_layer(0)
+        .layer_count(1)
+        .build();
+
+    let rgba_cm = vk::ComponentMapping {
+        r: vk::ComponentSwizzle::IDENTITY,
+        g: vk::ComponentSwizzle::IDENTITY,
+        b: vk::ComponentSwizzle::IDENTITY,
+        a: vk::ComponentSwizzle::IDENTITY,
+    };
+
+    let data_cm = vk::ComponentMapping {
+        r: vk::ComponentSwizzle::IDENTITY,
+        g: vk::ComponentSwizzle::IDENTITY,
+        b: vk::ComponentSwizzle::IDENTITY,
+        a: vk::ComponentSwizzle::IDENTITY,
+    };
+
+    let swapchain_image_views = swapchain_images
+        .iter()
+        .map(|&image| {
+            let create_info = vk::ImageViewCreateInfoBuilder::new()
+                .image(image)
+                .view_type(vk::ImageViewType::_2D)
+                .format(COLOR_FORMAT)
+                .components(rgba_cm)
+                .subresource_range(sub);
+            unsafe { device.create_image_view(&create_info, None, None) }.result()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let data_sub = vk::ImageSubresourceRangeBuilder::new()
+        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .base_mip_level(0)
+        .level_count(1)
+        .base_array_layer(0)
+        .layer_count(1)
+        .build();
+
+    let create_info = vk::ImageViewCreateInfoBuilder::new()
+        .image(gol_image)
+        .view_type(vk::ImageViewType::_2D)
+        .format(DATA_FORMAT)
+        .components(data_cm)
+        .subresource_range(data_sub);
+    let gol_image_view_a =
+        unsafe { device.create_image_view(&create_info, None, None) }.result()?;
+    let gol_image_view_b =
+        unsafe { device.create_image_view(&create_info, None, None) }.result()?;
 
     // Create synchronization primitives
     let create_info = vk::SemaphoreCreateInfoBuilder::new();
 
     // Whether or not the frame at this index is available (gpu-only)
-    let image_available = 
-        unsafe { device.create_semaphore(&create_info, None, None) }.result()?;
+    let image_available = unsafe { device.create_semaphore(&create_info, None, None) }.result()?;
 
     // Whether or not the frame at this index is finished rendering (gpu-only)
-    let render_finished =
-        unsafe { device.create_semaphore(&create_info, None, None) }.result()?;
+    let render_finished = unsafe { device.create_semaphore(&create_info, None, None) }.result()?;
+
+    let mut read_a = false;
 
     // Main loop
-    let mut time = 0;
     loop {
         // Get the index of the next swapchain image,
         // and set up a semaphore to be notified when it is ready.
@@ -168,23 +303,43 @@ fn main() -> Result<()> {
         }
         .result()?;
 
-        // Create image data
-        let the_image = (0..image_size_bytes)
-            .map(|v| {
-                if (v as f32 + time as f32).cos() < 0.0 {
-                    255
-                } else {
-                    0
-                }
-            })
-        .collect::<Vec<_>>();
-
-        // Map image data
-        let mut map = display_image_mem.map(&device, ..).result()?;
-        map.import(&the_image);
-        map.unmap(&device).result()?;
-
         let swapchain_image = swapchain_images[image_index as usize];
+        let swapchain_image_view = swapchain_image_views[image_index as usize];
+
+        // Update descriptor set to include the buffer
+        unsafe {
+            let swapchain_diib =
+                [vk::DescriptorImageInfoBuilder::new().image_view(swapchain_image_view)];
+            let swapchain_desc = vk::WriteDescriptorSetBuilder::new()
+                .dst_set(descriptor_set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                .image_info(&swapchain_diib);
+
+            let read_diib = [vk::DescriptorImageInfoBuilder::new().image_view(if read_a {
+                gol_image_view_a
+            } else {
+                gol_image_view_b
+            })];
+            let read_desc = vk::WriteDescriptorSetBuilder::new()
+                .dst_set(descriptor_set)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                .image_info(&read_diib);
+
+            let write_diib = [vk::DescriptorImageInfoBuilder::new().image_view(if read_a {
+                gol_image_view_b
+            } else {
+                gol_image_view_a
+            })];
+            let write_desc = vk::WriteDescriptorSetBuilder::new()
+                .dst_set(descriptor_set)
+                .dst_binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                .image_info(&write_diib);
+
+            device.update_descriptor_sets(&[swapchain_desc, read_desc, write_desc], &[])
+        };
 
         // Build command buffer
         let command_buffer = command_buffer;
@@ -208,11 +363,11 @@ fn main() -> Result<()> {
             let swapchain_image_barrier = vk::ImageMemoryBarrierBuilder::new()
                 .image(swapchain_image)
                 .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::GENERAL)
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .src_access_mask(vk::AccessFlags::empty())
-                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::empty())
                 .subresource_range(sub);
 
             device.cmd_pipeline_barrier(
@@ -225,33 +380,7 @@ fn main() -> Result<()> {
                 &[swapchain_image_barrier],
             );
 
-            // Copy from staging image to swapchain image
-            let sub = vk::ImageSubresourceLayersBuilder::new()
-                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                .mip_level(0)
-                .base_array_layer(0)
-                .layer_count(1)
-                .build();
-            let off = vk::Offset3DBuilder::new().x(0).y(0).z(0).build();
-            let extent = vk::Extent3DBuilder::new()
-                .width(surface_caps.current_extent.width)
-                .height(surface_caps.current_extent.height)
-                .depth(1)
-                .build();
-            let copy_info = vk::BufferImageCopyBuilder::new()
-                .buffer_offset(0)
-                .buffer_row_length(0)
-                .buffer_image_height(0)
-                .image_subresource(sub)
-                .image_offset(off)
-                .image_extent(extent);
-            device.cmd_copy_buffer_to_image(
-                command_buffer,
-                display_image,
-                swapchain_image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &[copy_info],
-            );
+            // TODO: Invoke shader here!
 
             // Transition display image from SRC_OPTIMAL to GENERAL, preserving contents
             // Transition swapchain image from DST_OPTIMAL to SRC_KHR
@@ -265,17 +394,17 @@ fn main() -> Result<()> {
 
             let swapchain_image_barrier = vk::ImageMemoryBarrierBuilder::new()
                 .image(swapchain_image)
-                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .old_layout(vk::ImageLayout::GENERAL)
                 .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
                 .dst_access_mask(vk::AccessFlags::empty())
                 .subresource_range(sub);
 
             device.cmd_pipeline_barrier(
                 command_buffer,
-                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
                 vk::PipelineStageFlags::BOTTOM_OF_PIPE,
                 None,
                 &[],
@@ -296,11 +425,7 @@ fn main() -> Result<()> {
             .wait_dst_stage_mask(&[vk::PipelineStageFlags::COMPUTE_SHADER])
             .command_buffers(&command_buffers)
             .signal_semaphores(&signal_semaphores);
-        unsafe {
-            device
-                .queue_submit(queue, &[submit_info], None)
-                .unwrap()
-        }
+        unsafe { device.queue_submit(queue, &[submit_info], None).unwrap() }
 
         let swapchains = [swapchain];
         let image_indices = [image_index];
@@ -314,8 +439,6 @@ fn main() -> Result<()> {
         unsafe {
             device.queue_wait_idle(queue).result()?;
         }
-
-        time += 1;
+        read_a = !read_a;
     }
 }
-

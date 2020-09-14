@@ -5,6 +5,9 @@ Barrier presentimage (PRESENT\_SRC -> GENERAL)
 Shader (writebuffer -> presentimage)
 Barrier presentimage (GENERAL -> PRESENT\_SRC)
 
-Make the pipeline synchronous: 
-* Just one command buffer, image, semaphore per step, etc.
-* Wait for queue idle before next
+Create image views, refer to them with the descriptor sets that get swapped
+
+* Descriptor sets for:
+Image input layer
+Image output layer
+Swapchain image
