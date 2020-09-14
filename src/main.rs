@@ -8,7 +8,12 @@ use erupt::{
 };
 use hardware_query::HardwareSelection;
 use std::{ffi::CString, os::raw::c_char};
-use winit::{event_loop::EventLoop, window::WindowBuilder};
+use winit::{
+    event::{Event, WindowEvent},
+    event_loop::{ControlFlow, EventLoop},
+    window::WindowBuilder,
+    dpi::PhysicalPosition,
+};
 
 const COLOR_FORMAT_SWAP: vk::Format = vk::Format::B8G8R8A8_SRGB;
 const COLOR_FORMAT_INTERMEDIATE: vk::Format = vk::Format::R8G8B8A8_UINT;
@@ -188,8 +193,17 @@ fn main() -> Result<()> {
         unsafe { device.create_shader_module(&create_info, None, None) }.result()?;
 
     // Pipeline
+    let push_constant_ranges = [
+        vk::PushConstantRangeBuilder::new()
+            .offset(0)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .size(2 * std::mem::size_of::<i32>() as u32)
+    ];
+
     let create_info =
-        vk::PipelineLayoutCreateInfoBuilder::new().set_layouts(&descriptor_set_layouts);
+        vk::PipelineLayoutCreateInfoBuilder::new()
+        .push_constant_ranges(&push_constant_ranges)
+        .set_layouts(&descriptor_set_layouts);
     let pipeline_layout =
         unsafe { device.create_pipeline_layout(&create_info, None, None) }.result()?;
 
@@ -334,7 +348,7 @@ fn main() -> Result<()> {
     let mut read_a = false;
 
     // Main loop
-    loop {
+    let mut draw = move |mouse_pos: (i32, i32)| -> Result<()> {
         // Get the index of the next swapchain image,
         // and set up a semaphore to be notified when it is ready.
         let image_index = unsafe {
@@ -346,16 +360,16 @@ fn main() -> Result<()> {
 
         // Update descriptor set to include the buffer
         unsafe {
-            let intermediate_diib = [vk::DescriptorImageInfoBuilder::new()
+            let intermediate_di = [vk::DescriptorImageInfoBuilder::new()
                 .image_layout(vk::ImageLayout::GENERAL)
                 .image_view(intermediate_image_view)];
             let intermediate_desc = vk::WriteDescriptorSetBuilder::new()
                 .dst_set(descriptor_set)
                 .dst_binding(0)
                 .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                .image_info(&intermediate_diib);
+                .image_info(&intermediate_di);
 
-            let read_diib = [vk::DescriptorImageInfoBuilder::new()
+            let read_di = [vk::DescriptorImageInfoBuilder::new()
                 .image_view(if read_a {
                     gol_image_view_a
                 } else {
@@ -366,9 +380,9 @@ fn main() -> Result<()> {
                 .dst_set(descriptor_set)
                 .dst_binding(1)
                 .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                .image_info(&read_diib);
+                .image_info(&read_di);
 
-            let write_diib = [vk::DescriptorImageInfoBuilder::new()
+            let write_di = [vk::DescriptorImageInfoBuilder::new()
                 .image_view(if read_a {
                     gol_image_view_b
                 } else {
@@ -379,7 +393,7 @@ fn main() -> Result<()> {
                 .dst_set(descriptor_set)
                 .dst_binding(2)
                 .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                .image_info(&write_diib);
+                .image_info(&write_di);
 
             device.update_descriptor_sets(&[intermediate_desc, read_desc, write_desc], &[])
         };
@@ -421,6 +435,17 @@ fn main() -> Result<()> {
                 &[],
                 &[],
                 &[intermediate_image_barrier],
+            );
+
+            // Push constants for mouse pos
+            let values = [mouse_pos.0, mouse_pos.1];
+            device.cmd_push_constants(
+                command_buffer,
+                pipeline_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                2 * std::mem::size_of::<i32>() as u32,
+                &values as *const i32 as _
             );
 
             // Dispatch
@@ -548,6 +573,28 @@ fn main() -> Result<()> {
             device.queue_wait_idle(queue).result()?;
         }
         read_a = !read_a;
-    }
-    // TODO: Dealloc all, use winit eventloop
+        Ok(())
+    };
+
+    let mut mouse_pos = None;
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::Poll;
+        match event {
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => *control_flow = ControlFlow::Exit,
+            Event::WindowEvent {
+                event: WindowEvent::CursorMoved { position, .. },
+                ..
+            } => {
+                let PhysicalPosition { x, y, .. } = position;
+                mouse_pos = Some((x as i32, y as i32));
+            },
+            Event::MainEventsCleared => {
+                draw(mouse_pos.unwrap_or((-1, -1))).unwrap();
+            }
+            _ => (),
+        }
+    });
 }

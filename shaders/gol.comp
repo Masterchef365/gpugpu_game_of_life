@@ -1,24 +1,71 @@
 #version 450
 layout (local_size_x = 16, local_size_y = 16) in;
 
+layout (push_constant) uniform MousePos {
+    int x;
+    int y;
+} mouse;
 layout (binding=0, rgba8ui) uniform writeonly uimage2D displayImg;
 layout (binding=1, r8ui) uniform readonly uimage2D readImg;
 layout (binding=2, r8ui) uniform writeonly uimage2D writeImg;
 
+uint chk_read(ivec2 pos) {
+    if (pos.x < 0 || pos.y < 0 || pos.x > gl_GlobalInvocationID.x || pos.y > gl_GlobalInvocationID.y) {
+        return 0;
+    } else {
+        return uint(imageLoad(readImg, pos).x == 1);
+    }
+}
+
+uint area_sum(ivec2 pos) {
+    return chk_read(pos + ivec2(-1, -1)) +
+        chk_read(pos + ivec2(0, -1)) +
+        chk_read(pos + ivec2(1, -1)) +
+        chk_read(pos + ivec2(-1, 0)) +
+        chk_read(pos + ivec2(1, 0)) +
+        chk_read(pos + ivec2(-1, 1)) +
+        chk_read(pos + ivec2(0, 1)) +
+        chk_read(pos + ivec2(1, 1));
+}
+
 void main() {
     ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    bool alive = true;
+
+    // Life
     uvec4 inp = imageLoad(readImg, gid);
 
-    uvec3 color;
-    uvec4 outp;
-    if (inp.x == 0) {
-        color = uvec3(255, 0, 0);
-        outp = uvec4(1, 0, 0, 0);
+    /*
+    uint area_sum = chk_read(gid);
+    bool old_value = imageLoad(readImg, gid).x == 1;
+    if (old_value) {
+        alive = area_sum == 2 || area_sum == 3;
     } else {
-        color = uvec3(0, 255, 0);
-        outp = uvec4(0, 0, 0, 0);
+        alive = area_sum == 3;
     }
 
-    imageStore(writeImg, gid, outp);
+    imageStore(writeImg, gid, uvec4(uint(alive), 0, 0, 0));
+    */
+
+    // Drawing
+    if (gid.x == mouse.x && gid.y == mouse.y) {
+        imageStore(writeImg, gid, uvec4(1, 0, 0, 0));
+    }
+
+    alive = inp.x != 0;
+
+    // Display 
+    uvec3 color;
+    if (alive) {
+        color = uvec3(255, 255, 255);
+    } else {
+        color = uvec3(0, 0, 0);
+    }
+
+    /*
+    ivec2 mousep = ivec2(mouse.x, mouse.y);
+    float m = length(gid - mousep);
+    color = uvec3(255 * m / 255, 128, 0);
+    */
     imageStore(displayImg, gid, uvec4(color, 255));
 }
