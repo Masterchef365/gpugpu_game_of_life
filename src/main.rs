@@ -235,7 +235,7 @@ fn main() -> Result<()> {
         .array_layers(2)
         .format(DATA_FORMAT)
         .tiling(vk::ImageTiling::LINEAR)
-        .initial_layout(vk::ImageLayout::UNDEFINED)
+        .initial_layout(vk::ImageLayout::GENERAL)
         .usage(vk::ImageUsageFlags::STORAGE)
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
         .samples(vk::SampleCountFlagBits::_1);
@@ -447,7 +447,7 @@ fn main() -> Result<()> {
                 pipeline_layout,
                 vk::ShaderStageFlags::COMPUTE,
                 0,
-                2 * std::mem::size_of::<i32>() as u32,
+                2 * std::mem::size_of::<i32>() as u32, // TODO: use size_of_val here
                 &values as *const i32 as _
             );
 
